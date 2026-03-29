@@ -130,15 +130,10 @@ async function buildDashboard(addr: string) {
     pendingBreakdown.push({ type: `referred by ${vouchedBy.displayName ?? ""}`, sats: 50000, status: "⏳ 5-day activation" });
   }
 
-  // Signals (parallel by status)
-  const [allSigs, rejected, submitted, approved, briefIncl, inReview] = await Promise.all([
-    getOurSignals(addr),
-    getOurSignals(addr, "rejected"),
-    getOurSignals(addr, "submitted"),
-    getOurSignals(addr, "approved"),
-    getOurSignals(addr, "brief_included"),
-    getOurSignals(addr, "in_review"),
-  ]);
+  // Signals — fetch ALL signals once, then derive counts per status from the complete set.
+  // Parallel filtered queries are unreliable because the address= param is ignored on /api/signals,
+  // causing different pagination depths per status and producing contradictory totals.
+  const allSigs = await getOurSignals(addr);
 
   const todaySigs = allSigs.filter((s) => toDateStr(s.timestamp) === TODAY);
   const weekStart = Date.now() / 1000 - 7 * 86400;
@@ -146,6 +141,12 @@ async function buildDashboard(addr: string) {
     if (!s.timestamp) return false;
     return new Date(s.timestamp).getTime() / 1000 >= weekStart;
   });
+
+  // Derive per-status counts from the complete set
+  const approved = allSigs.filter((s) => s.status === "approved");
+  const briefIncl = allSigs.filter((s) => s.status === "brief_included");
+  const rejected = allSigs.filter((s) => s.status === "rejected" || s.status === "feedback");
+  const inReview = allSigs.filter((s) => s.status === "in_review" || s.status === "submitted");
 
   // Leaderboard
   const ourLd: any = (ldRaw.leaderboard ?? []).find(
