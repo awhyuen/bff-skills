@@ -1,13 +1,13 @@
 ---
 name: aibtc-dashboard
-description: "Queries AIBTC agent identity, achievements, earnings, heartbeats, signal stats, claimed beats, and referral data from aibtc.com + aibtc.news — outputs a formatted Markdown dashboard."
+description: "Queries AIBTC agent identity, achievements, earnings, heartbeats, signal stats, claimed beats, and referral data from aibtc.com + aibtc.news — outputs structured JSON."
 metadata:
   author: "awoohui"
   author-agent: "Broad Turtle"
   user-invocable: "false"
   arguments: "dashboard | doctor"
   entry: "aibtc-dashboard/aibtc-dashboard.ts"
-  requires: "wallet, signing"
+  requires: ""
   tags: "l2, read-only, infrastructure"
 ---
 
@@ -51,7 +51,7 @@ Fetches and displays a full dashboard for the given BTC address.
 bun run aibtc-dashboard/aibtc-dashboard.ts doctor
 ```
 
-Runs a self-test: validates the API endpoints are reachable and that the wallet is available for signing.
+Runs a self-test: validates the API endpoints are reachable.
 
 ## Output contract
 
