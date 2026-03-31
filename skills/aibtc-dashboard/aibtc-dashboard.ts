@@ -114,9 +114,18 @@ async function buildDashboard(addr: string) {
   const referredAgents: any[] = vouch.vouchedFor?.agents ?? [];
   const remainingRef = vouch.vouchedFor?.remainingReferrals ?? "?";
 
-  // Earnings
-  const cdEarnings: any = newsStatus.earnings ?? {};
-  const totalEarned = typeof cdEarnings === "object" ? (cdEarnings.total ?? 0) : 0;
+  // Earnings — newsStatus.earnings is a LIST of earnings records, not a dict with a `total` field
+  // Each record: { id, btcAddress, amount_sats, reason, reference_id, created_at, payout_txid, voided_at }
+  const cdEarningsList: any[] = Array.isArray(newsStatus.earnings) ? newsStatus.earnings : [];
+  let totalEarned = 0;
+  if (Array.isArray(cdEarningsList)) {
+    for (const e of cdEarningsList) {
+      // Only count brief_inclusion earnings that are NOT voided
+      if (e.reason === "brief_inclusion" && !e.voided_at) {
+        totalEarned += e.amount_sats ?? 0;
+      }
+    }
+  }
 
   // Pending
   let pendingSats = 0;
@@ -132,6 +141,17 @@ async function buildDashboard(addr: string) {
   if (vouchedBy) {
     pendingSats += 50000;
     pendingBreakdown.push({ type: `referred by ${vouchedBy.displayName ?? ""}`, sats: 50000, status: "⏳ 5-day activation" });
+  }
+
+  // Add brief_inclusion earnings to pending (these are signal rewards, 30000 sats each)
+  if (Array.isArray(cdEarningsList)) {
+    for (const e of cdEarningsList) {
+      if (e.reason === "brief_inclusion" && !e.voided_at) {
+        pendingSats += e.amount_sats ?? 0;
+        const refShort = (e.reference_id ?? "?").slice(0, 8);
+        pendingBreakdown.push({ type: `signal ${refShort}...`, sats: e.amount_sats ?? 0, status: "⏳ pending" });
+      }
+    }
   }
 
   // Signals — scan ALL signals via full pagination, then derive per-status counts.
