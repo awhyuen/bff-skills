@@ -114,9 +114,28 @@ async function buildDashboard(addr: string) {
   const referredAgents: any[] = vouch.vouchedFor?.agents ?? [];
   const remainingRef = vouch.vouchedFor?.remainingReferrals ?? "?";
 
-  // Earnings
-  const cdEarnings: any = newsStatus.earnings ?? {};
-  const totalEarned = typeof cdEarnings === "object" ? (cdEarnings.total ?? 0) : 0;
+  // Earnings — newsStatus.earnings is a LIST of earnings records
+  // Each record: { id, btcAddress, amount_sats, reason, reference_id, created_at, payout_txid, voided_at }
+  // paid: has payout_txid; pending: no payout_txid AND not voided; voided records are skipped
+  const cdEarningsList: any[] = Array.isArray(newsStatus.earnings) ? newsStatus.earnings : [];
+  let totalEarned = 0; // actually paid out (has payout_txid)
+  let pendingEarned = 0; // approved but not yet paid (no payout_txid, not voided)
+  const pendingEarnedDetail: any[] = [];
+
+  if (Array.isArray(cdEarningsList)) {
+    for (const e of cdEarningsList) {
+      if (e.reason !== "brief_inclusion") continue;
+      if (e.voided_at) continue; // skip voided entries
+      const amt = e.amount_sats ?? 0;
+      if (e.payout_txid) {
+        totalEarned += amt; // actually paid
+      } else {
+        pendingEarned += amt; // approved but awaiting payout
+        const refShort = (e.reference_id ?? "?").slice(0, 8);
+        pendingEarnedDetail.push({ type: `signal ${refShort}...`, sats: amt, status: "⏳ pending" });
+      }
+    }
+  }
 
   // Pending
   let pendingSats = 0;
@@ -133,6 +152,10 @@ async function buildDashboard(addr: string) {
     pendingSats += 50000;
     pendingBreakdown.push({ type: `referred by ${vouchedBy.displayName ?? ""}`, sats: 50000, status: "⏳ 5-day activation" });
   }
+
+  // Add brief_inclusion pending earnings to pendingSats
+  pendingSats += pendingEarned;
+  pendingBreakdown.push(...pendingEarnedDetail);
 
   // Signals — scan ALL signals via full pagination, then derive per-status counts.
   // Do NOT break on empty pages (signals are scattered across arbitrary global offsets).
