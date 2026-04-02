@@ -174,6 +174,12 @@ async function buildDashboard(addr: string) {
   const rejected = allSigs.filter((s) => s.status === "rejected" || s.status === "feedback");
   const inReview = allSigs.filter((s) => s.status === "in_review" || s.status === "submitted");
 
+  // briefIncluded count: derive from newsStatus.earnings (authoritative),
+  // not from paginated scan (which can undercount if empty pages cause early break).
+  const briefIncludedCount = Array.isArray(cdEarningsList)
+    ? cdEarningsList.filter((e) => e.reason === "brief_inclusion" && !e.voided_at).length
+    : 0;
+
   // Leaderboard
   const ourLd: any = (ldRaw.leaderboard ?? []).find(
     (e: any) => e.address?.toLowerCase() === addr.toLowerCase()
@@ -210,13 +216,16 @@ async function buildDashboard(addr: string) {
       signals: {
         total: totalSignals,
         approved: approved.length,
-        briefIncluded: briefIncl.length,
+        briefIncluded: briefIncludedCount,
         rejected: rejected.length,
         inReview: inReview.length,
         today: signalsToday,
         thisWeek: weekSigs.length,
       },
-      leaderboard: { score: lbScore, breakdown: lbBreakdown },
+      leaderboard: {
+        score: lbScore,
+        breakdown: { ...lbBreakdown, briefInclusions: briefIncludedCount },
+      },
       beatsClaimed,
       referral,
     },
