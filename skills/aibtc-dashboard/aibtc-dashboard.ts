@@ -24,6 +24,7 @@ async function apiGet(url: string, timeout = 15000): Promise<any> {
 
 interface AgentRecord {
   btcAddress: string;
+  stxAddress?: string;
   displayName: string | null;
   level: number;
   levelName: string;
@@ -67,6 +68,56 @@ async function getOurSignals(addr: string): Promise<Signal[]> {
   return results;
 }
 
+// ── Hiro on-chain sBTC ───────────────────────────────────────────────────────
+
+// Fetch all sBTC transfers received by a given STX address.
+// The /address/{addr}/transactions endpoint returns empty events arrays for
+// contract_call txs, so we: (1) list tx IDs, (2) fetch each tx individually
+// to get fungible_token_asset events with sender/receiver/amount.
+async function getSbtcReceived(stxAddr: string): Promise<{ sats: number; txCount: number }> {
+  if (!stxAddr || !stxAddr.startsWith("SP")) return { sats: 0, txCount: 0 };
+  try {
+    const listUrl = `https://api.hiro.so/extended/v1/address/${stxAddr}/transactions?limit=50`;
+    const listData = await apiGet(listUrl);
+    const txs: any[] = listData.results ?? [];
+
+    const sbtcTxids = txs
+      .filter(
+        (tx: any) =>
+          tx.tx_type === "contract_call" &&
+          (tx.contract_call?.contract_id ?? "").includes("sbtc-token") &&
+          tx.contract_call?.function_name === "transfer"
+      )
+      .map((tx: any) => tx.tx_id as string);
+
+    if (!sbtcTxids.length) return { sats: 0, txCount: 0 };
+
+    let totalSats = 0;
+    let count = 0;
+    for (const txid of sbtcTxids.slice(0, 20)) {
+      try {
+        const txData = await apiGet(`https://api.hiro.so/extended/v1/tx/${txid}`);
+        const events: any[] = txData.events ?? [];
+        for (const evt of events) {
+          if (evt.event_type !== "fungible_token_asset") continue;
+          const ft = evt.asset ?? {};
+          if (
+            !ft.asset_id?.includes("sbtc") ||
+            ft.asset_event_type !== "transfer" ||
+            ft.recipient !== stxAddr
+          )
+            continue;
+          totalSats += Number(ft.amount ?? 0);
+          count++;
+        }
+      } catch {}
+    }
+    return { sats: totalSats, txCount: count };
+  } catch {
+    return { sats: 0, txCount: 0 };
+  }
+}
+
 // ── Main logic ────────────────────────────────────────────────────────────────
 
 const LEVEL_NAMES: Record<number, string> = { 0: "Unverified", 1: "Registered", 2: "Genesis" };
@@ -93,6 +144,15 @@ async function buildDashboard(addr: string) {
     apiGet("https://aibtc.news/api/leaderboard?limit=50").catch(() => ({})),
   ]);
 
+  // STX address for on-chain sBTC query (authoritative payout tracking)
+  const stxAddr = agent?.stxAddress ?? null;
+  const [{ sats: chainSats, txCount: chainTxCount }, stxChain] = await Promise.all([
+    getSbtcReceived(stxAddr ?? ""),
+    stxAddr
+      ? apiGet(`https://api.hiro.so/extended/v1/address/${stxAddr}/stx`).catch(() => ({}))
+      : Promise.resolve({}),
+  ]);
+
   const ori: any = hb.orientation ?? {};
   const displayName = agent?.displayName ?? ori.displayName ?? "未设置";
   const levelVal = ori.level ?? agent?.level ?? 0;
@@ -114,18 +174,35 @@ async function buildDashboard(addr: string) {
   const referredAgents: any[] = vouch.vouchedFor?.agents ?? [];
   const remainingRef = vouch.vouchedFor?.remainingReferrals ?? "?";
 
-  // Earnings — newsStatus.earnings is a LIST of earnings records, not a dict with a `total` field
+  // Earnings — newsStatus.earnings is a LIST of earnings records
   // Each record: { id, btcAddress, amount_sats, reason, reference_id, created_at, payout_txid, voided_at }
+  // totalEarned: use chain sBTC as authoritative source (payout_txid sync is unreliable).
+  // briefIncludedCount: count ALL non-voided brief_inclusions (paid + pending).
+  // pendingEarned: brief_inclusion entries without payout_txid (awaiting chain confirmation).
   const cdEarningsList: any[] = Array.isArray(newsStatus.earnings) ? newsStatus.earnings : [];
-  let totalEarned = 0;
+
+  let briefIncludedCount = 0;
+  let pendingEarned = 0;
+  const pendingEarnedDetail: any[] = [];
+
   if (Array.isArray(cdEarningsList)) {
     for (const e of cdEarningsList) {
-      // Only count brief_inclusion earnings that are NOT voided
-      if (e.reason === "brief_inclusion" && !e.voided_at) {
-        totalEarned += e.amount_sats ?? 0;
+      if (e.reason !== "brief_inclusion") continue;
+      if (e.voided_at) continue;
+      briefIncludedCount++;
+      const amt = e.amount_sats ?? 0;
+      if (!e.payout_txid) {
+        pendingEarned += amt;
+        const refShort = (e.reference_id ?? "?").slice(0, 8);
+        pendingEarnedDetail.push({ type: `signal ${refShort}...`, sats: amt, status: "⏳ pending" });
       }
     }
   }
+
+  const platformTotal = cdEarningsList
+    .filter((e: any) => e.reason === "brief_inclusion" && !e.voided_at && e.payout_txid)
+    .reduce((sum: number, e: any) => sum + (e.amount_sats ?? 0), 0);
+  const totalEarned = chainSats > 0 ? chainSats : platformTotal;
 
   // Pending
   let pendingSats = 0;
@@ -143,16 +220,8 @@ async function buildDashboard(addr: string) {
     pendingBreakdown.push({ type: `referred by ${vouchedBy.displayName ?? ""}`, sats: 50000, status: "⏳ 5-day activation" });
   }
 
-  // Add brief_inclusion earnings to pending (these are signal rewards, 30000 sats each)
-  if (Array.isArray(cdEarningsList)) {
-    for (const e of cdEarningsList) {
-      if (e.reason === "brief_inclusion" && !e.voided_at) {
-        pendingSats += e.amount_sats ?? 0;
-        const refShort = (e.reference_id ?? "?").slice(0, 8);
-        pendingBreakdown.push({ type: `signal ${refShort}...`, sats: e.amount_sats ?? 0, status: "⏳ pending" });
-      }
-    }
-  }
+  pendingSats += pendingEarned;
+  pendingBreakdown.push(...pendingEarnedDetail);
 
   // Signals — scan ALL signals via full pagination, then derive per-status counts.
   // Do NOT break on empty pages (signals are scattered across arbitrary global offsets).
@@ -170,22 +239,17 @@ async function buildDashboard(addr: string) {
 
   // Derive per-status counts from the complete scanned set
   const approved = allSigs.filter((s) => s.status === "approved");
-  const briefIncl = allSigs.filter((s) => s.status === "brief_included");
   const rejected = allSigs.filter((s) => s.status === "rejected" || s.status === "feedback");
   const inReview = allSigs.filter((s) => s.status === "in_review" || s.status === "submitted");
-
-  // briefIncluded count: derive from newsStatus.earnings (authoritative),
-  // not from paginated scan (which can undercount if empty pages cause early break).
-  const briefIncludedCount = Array.isArray(cdEarningsList)
-    ? cdEarningsList.filter((e) => e.reason === "brief_inclusion" && !e.voided_at).length
-    : 0;
 
   // Leaderboard
   const ourLd: any = (ldRaw.leaderboard ?? []).find(
     (e: any) => e.address?.toLowerCase() === addr.toLowerCase()
   );
   const lbScore = ourLd?.score ?? newsStatus.score ?? "?";
-  const lbBreakdown = ourLd?.breakdown ?? {};
+  // Override briefInclusions with our authoritative count from newsStatus.earnings;
+  // leaderboard API's breakdown.briefInclusions can be stale/misaligned.
+  const lbBreakdown = ourLd?.breakdown ? { ...ourLd.breakdown, briefInclusions: briefIncludedCount } : {};
 
   // Beats
   let beatsClaimed: string[] = newsStatus.beatsClaimed ?? [];
@@ -209,6 +273,12 @@ async function buildDashboard(addr: string) {
       checkInCount: checkins,
       lastActiveAt: lastActiveS,
       todayCheckedIn,
+      stxAddress: stxAddr,
+      chain: {
+        satsReceived: chainSats,
+        sbtcTxCount: chainTxCount,
+        stxBalance: stxChain.balance ?? stxChain.balance?.toString() ?? "N/A",
+      },
       totalEarned,
       pendingSats,
       pendingBreakdown,
